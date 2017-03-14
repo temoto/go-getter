@@ -1,37 +1,66 @@
 #!/bin/bash
 # Like 'go get' but with pinned package versions. https://github.com/joewalnes/go-getter
 set -eu
+# TODO: GOPATH is not required in go1.8+
 : ${GOPATH?"GOPATH not set"}
 : ${1?"Usage: $0 [path-to-go-deps]"}
-sed -e 's/#.*//' $1 | grep -v -e '^[[:space:]]*$' | while read PKG HASH; do
-  echo "$PKG ($HASH)" >&2
-  DEST=$GOPATH/src/$PKG
-  go get -d -u $PKG || true
-  FOUND_VCS=0
-  while [[ "$DEST" != "$GOPATH/src" ]] && [[ -d $DEST ]]
-  do
-    cd $DEST
-    if [ -d "$DEST/.git" ]; then
-      FOUND_VCS=1
-      git checkout -q $HASH
-      break
-    elif [ -d "$DEST/.hg" ]; then
-      FOUND_VCS=1
-      hg update -q -c $HASH
-      break
-    elif [ -d "$DEST/.bzr" ]; then
-      FOUND_VCS=1
-      bzr update -q -r $HASH
-      break
-    elif [ -d "$DEST/.svn" ]; then
-      FOUND_VCS=1
-      svn update -q -r $HASH
-      break
+
+vcs_command() {
+  local package="$1"
+  local dest="$GOPATH/src/$package"
+  while [[ "$dest" != "$GOPATH/src" ]] && [[ -d "$dest" ]] ; do
+    cd "$dest"
+    if [[ -d "./.git" ]]; then
+      echo "cd $dest && git checkout -q $version --"
+      return 0
+    elif [[ -d "./.hg" ]]; then
+      echo "cd $dest && hg update -q -c $version"
+      return 0
+    elif [[ -d "./.bzr" ]]; then
+      echo "cd $dest && bzr update -q -r $version"
+      return 0
+    elif [[ -d "./.svn" ]]; then
+      echo "cd $dest && svn update -q -r $version"
+      return 0
     else
-      DEST="$(readlink -f $DEST/..)"
+      dest="$(readlink -f $dest/..)"
     fi
   done
-  if [ $FOUND_VCS -eq 0 ]; then
-    echo "WARNING: Unrecognized VCS system for the golang package $PKG" >&2
+  echo "ERROR: Unrecognized VCS system for the golang package $package" >&2
+  exit 2
+}
+
+step() {
+  local package="$1"
+  local mode="$2"
+  case "$mode" in
+  local)
+    go get -d $package
+  	$(vcs_command "$package") >/dev/null 2>&1 || return 1
+    ;;
+  update)
+    go get -d -u $package
+  	$(vcs_command "$package") >&2
+    ;;
+  install)
+    go get $package
+    return 0
+    ;;
+  *)
+    echo 'internal error invalid mode' >&2
+    exit 3
+    ;;
+  esac
+}
+
+sed -e 's/#.*//' $1 |grep -v -e '^[[:space:]]*$' |while read package version ; do
+  echo "$package ($version)" >&2
+  rc=0
+  step "$package" "local" || rc=$?
+  if [[ $rc -eq 1 ]]; then
+  	echo "  $package ($version) is not found in local repo, trying go get -u" >&2
+  	step "$package" "update"
   fi
+  # now that required version is selected, build/install it
+  step "$package" "install"
 done
